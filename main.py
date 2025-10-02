@@ -275,6 +275,40 @@ async def register_callback(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 # ----------------------------
+# INLINE MAIN BUTTON CALLBACK HANDLERS
+# ----------------------------
+@dp.callback_query(F.data == "results")
+async def results_callback(call: CallbackQuery):
+    try:
+        sheet = connect_to_sheet()
+        data = sheet.get_all_values()
+    except Exception:
+        await call.message.answer("⚠️ Reytingni olishda xatolik yuz berdi.")
+        await call.answer()
+        return
+    if len(data) <= 1:
+        await call.message.answer("📊 Reytinglar hali mavjud emas.")
+        await call.answer()
+        return
+    lines = ["🏆 Reyting:\n"]
+    for idx, row in enumerate(data[1:21], start=1):
+        nickname = row[0] if len(row) > 0 else "-"
+        pubg_id = row[1] if len(row) > 1 else "-"
+        lines.append(f"{idx}. {nickname} (ID: {pubg_id})")
+    await call.message.answer("\n".join(lines))
+    await call.answer()
+
+@dp.callback_query(F.data == "my_games")
+async def my_games_callback(call: CallbackQuery):
+    await call.message.answer("🎮 Sizda hozircha o‘yin yo‘q.")
+    await call.answer()
+
+@dp.callback_query(F.data == "contact_admin")
+async def contact_admin_callback(call: CallbackQuery):
+    await call.message.answer("📩 Admin bilan bog‘lanish: @m24_shaxa_yt")
+    await call.answer()
+
+# ----------------------------
 # PAYMENT CHECK HANDLER
 # ----------------------------
 @dp.message(RegistrationState.waiting_for_payment_check, F.photo | F.document)
