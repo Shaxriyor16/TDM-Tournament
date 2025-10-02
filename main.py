@@ -194,6 +194,53 @@ async def start_handler(message: Message, state: FSMContext):
     )
 
 # ----------------------------
+# COMMANDS
+# ----------------------------
+@dp.message(Command("register"))
+async def cmd_register(message: Message, state: FSMContext):
+    await ask_for_payment(message, state)
+
+@dp.message(Command("mygames"))
+async def cmd_mygames(message: Message):
+    await message.answer("🎮 Sizda hozircha o‘yin yo‘q.")
+
+@dp.message(Command("contactwithadmin"))
+async def cmd_contact_admin(message: Message):
+    await message.answer("📩 Admin bilan bog‘lanish: @m24_shaxa_yt")
+
+@dp.message(Command("about"))
+async def cmd_about(message: Message):
+    await message.answer(
+        "🎮 PUBG MOBILE TURNIR BOT 🎮\n\n"
+        "Bu bot orqali siz pullik PUBG Mobile turnirlarida qatnashishingiz,\n"
+        "to‘lov qilgan holda ishtirok etishingiz va sovrinli o‘rinlar uchun kurashishingiz mumkin! 🏆"
+    )
+
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    await message.answer(
+        "/start\n/register\n/mygames\n/contactwithadmin\n/about\n/help\n/reyting"
+    )
+
+@dp.message(Command("reyting"))
+async def cmd_reyting(message: Message):
+    try:
+        sheet = connect_to_sheet()
+        data = sheet.get_all_values()
+    except Exception:
+        await message.answer("⚠️ Reytingni olishda xatolik yuz berdi.")
+        return
+    if len(data) <= 1:
+        await message.answer("📊 Reytinglar hali mavjud emas.")
+        return
+    lines = ["🏆 Reyting:\n"]
+    for idx, row in enumerate(data[1:21], start=1):
+        nickname = row[0] if len(row) > 0 else "-"
+        pubg_id = row[1] if len(row) > 1 else "-"
+        lines.append(f"{idx}. {nickname} (ID: {pubg_id})")
+    await message.answer("\n".join(lines))
+
+# ----------------------------
 # CALLBACKS, PAYMENT & FSM HANDLERS
 # ----------------------------
 @dp.callback_query(F.data == "check_subscription")
@@ -215,7 +262,6 @@ async def register_callback(call: CallbackQuery, state: FSMContext):
     await ask_for_payment(call, state)
     await call.answer()
 
-# Chekni qabul qilish
 @dp.message(RegistrationState.waiting_for_payment_check, F.photo | F.document)
 async def handle_check(message: Message, state: FSMContext):
     await message.answer("🕔 Chekingiz admin tomonidan tekshirilmoqda.")
@@ -246,7 +292,6 @@ async def handle_check(message: Message, state: FSMContext):
         return
     await state.set_state(RegistrationState.waiting_for_admin_approval)
 
-# Admin approve/reject
 @dp.callback_query(F.data.startswith("approve:"))
 async def approve_callback(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID:
@@ -271,7 +316,6 @@ async def reject_callback(call: CallbackQuery):
     await call.message.edit_reply_markup()
     await call.answer("❌ Rad etildi")
 
-# PUBG info qabul qilish
 @dp.message(RegistrationState.waiting_for_pubg_nick)
 async def handle_pubg_info(message: Message, state: FSMContext):
     text = message.text or ""
