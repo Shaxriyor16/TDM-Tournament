@@ -6,7 +6,6 @@ PUBG turnir bot (aiogram v3.22+ mos)
 - Google Sheets bilan ulangan (Reyting-bot.json)
 - Obuna tekshirish, to'lov cheklarini yuborish va admin tasdiqlash
 - Inline keyboard: START -> YouTube 1, YouTube 2, ✅ Tekshirish
-- Keep-alive funksiyasi (Replit/Render uchun)
 """
 
 import os
@@ -34,13 +33,12 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.base import StorageKey
 
 # ----------------------------
-# CONFIG (ENV)
+# CONFIG
 # ----------------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 SHEET_JSON = os.getenv("SHEET_JSON", "Reyting-bot.json")
 REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@M24SHaxa_youtube")
-SOURCE_CHANNEL = os.getenv("SOURCE_CHANNEL", "@M24SHaxa_youtube")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set. Put it into .env as BOT_TOKEN=your_token")
@@ -85,7 +83,7 @@ def append_to_sheet(nickname: str, pubg_id: str):
         return False
 
 # ----------------------------
-# FSM (States)
+# FSM STATES
 # ----------------------------
 class RegistrationState(StatesGroup):
     waiting_for_payment_check = State()
@@ -108,22 +106,6 @@ inline_main_buttons = InlineKeyboardMarkup(
     ]
 )
 
-subscribe_keyboard = InlineKeyboardMarkup(
-    inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Kanalga obuna bo‘lish", url=f"https://t.me/{REQUIRED_CHANNEL.lstrip('@')}")],
-        [InlineKeyboardButton(text="✅ Obuna bo‘ldim", callback_data="check_subscription")]
-    ]
-)
-
-approve_buttons_template = lambda user_id: InlineKeyboardMarkup(
-    inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ To‘g‘ri", callback_data=f"approve:{user_id}"),
-            InlineKeyboardButton(text="❌ Noto‘g‘ri", callback_data=f"reject:{user_id}")
-        ]
-    ]
-)
-
 reply_social_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📸 Instagram"), KeyboardButton(text="📱 Telegram")],
@@ -138,6 +120,15 @@ youtube_keyboard = InlineKeyboardMarkup(
         [InlineKeyboardButton(text="▶️ YouTube 1", url="https://www.youtube.com/@M24_SAHAXA")],
         [InlineKeyboardButton(text="▶️ YouTube 2", url="https://www.youtube.com/@SHAXA_GAMEPLAY")],
         [InlineKeyboardButton(text="✅ Tekshirish", callback_data="check_subscription")]
+    ]
+)
+
+approve_buttons_template = lambda user_id: InlineKeyboardMarkup(
+    inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ To‘g‘ri", callback_data=f"approve:{user_id}"),
+            InlineKeyboardButton(text="❌ Noto‘g‘ri", callback_data=f"reject:{user_id}")
+        ]
     ]
 )
 
@@ -160,8 +151,7 @@ async def ask_for_payment(target: Union[Message, CallbackQuery], state: FSMConte
     text = (
         "💳 <b>Karta turi:</b> HUMO\n"
         "💳 <b>Karta raqami:</b> <code>9860 6004 1512 3691</code>\n\n"
-        "📌 Toʻlovni amalga oshirib, CHECK (skrinshot) yuboring.\n"
-        "⏳ Sizda 5 soniya bor raqamni nusxalash uchun - soʻngra xabaringiz o'chadi."
+        "📌 Toʻlovni amalga oshirib, CHECK (skrinshot) yuboring."
     )
     msg = await bot.send_message(user_id, text)
     await asyncio.sleep(5)
@@ -176,7 +166,7 @@ async def ask_for_payment(target: Union[Message, CallbackQuery], state: FSMConte
 # START HANDLER
 # ----------------------------
 @dp.message(Command("start"))
-async def start_handler(message: Message, state: FSMContext):
+async def start_handler(message: Message):
     user_id = message.from_user.id
     if await check_subscription(user_id):
         await message.answer(
@@ -185,31 +175,44 @@ async def start_handler(message: Message, state: FSMContext):
             "<b>💸 TURNIR NARXI – 10 000 SO'M 💸</b>",
             reply_markup=inline_main_buttons
         )
-        return
-    await message.answer(
-        "👋 Assalomu alaykum!\n\n"
-        "Botdan foydalanish uchun quyidagi kanallarga obuna bo‘ling yoki tekshirib ko‘ring.\n\n"
-        "YouTube kanallarni ochib, obuna bo‘ling, so‘ngra ✅ Tekshirish tugmasini bosing 👇",
-        reply_markup=youtube_keyboard
-    )
+    else:
+        await message.answer(
+            "👋 Assalomu alaykum!\n\n"
+            "Botdan foydalanish uchun quyidagi kanallarga obuna bo‘ling va ✅ Tekshirish tugmasini bosing 👇",
+            reply_markup=youtube_keyboard
+        )
 
 # ----------------------------
-# COMMANDS
+# COMMAND HANDLERS
 # ----------------------------
+async def require_subscription(message: Message) -> bool:
+    if not await check_subscription(message.from_user.id):
+        await message.answer("❌ Kanalga obuna bo‘lishingiz kerak. ✅ Tekshirish tugmasini bosing.", reply_markup=youtube_keyboard)
+        return False
+    return True
+
 @dp.message(Command("register"))
 async def cmd_register(message: Message, state: FSMContext):
+    if not await require_subscription(message):
+        return
     await ask_for_payment(message, state)
 
 @dp.message(Command("mygames"))
 async def cmd_mygames(message: Message):
+    if not await require_subscription(message):
+        return
     await message.answer("🎮 Sizda hozircha o‘yin yo‘q.")
 
 @dp.message(Command("contactwithadmin"))
 async def cmd_contact_admin(message: Message):
+    if not await require_subscription(message):
+        return
     await message.answer("📩 Admin bilan bog‘lanish: @m24_shaxa_yt")
 
 @dp.message(Command("about"))
 async def cmd_about(message: Message):
+    if not await require_subscription(message):
+        return
     await message.answer(
         "🎮 PUBG MOBILE TURNIR BOT 🎮\n\n"
         "Bu bot orqali siz pullik PUBG Mobile turnirlarida qatnashishingiz,\n"
@@ -241,27 +244,39 @@ async def cmd_reyting(message: Message):
     await message.answer("\n".join(lines))
 
 # ----------------------------
-# CALLBACKS, PAYMENT & FSM HANDLERS
+# CALLBACK HANDLERS
 # ----------------------------
 @dp.callback_query(F.data == "check_subscription")
 async def subscription_callback(call: CallbackQuery):
-    if await check_subscription(call.from_user.id):
+    user_id = call.from_user.id
+    if await check_subscription(user_id):
         await call.message.edit_text(
             "✅ Obunangiz tasdiqlandi. Endi botdan to‘liq foydalanishingiz mumkin.",
             reply_markup=inline_main_buttons
         )
     else:
         await call.message.edit_text(
-            "❌ Siz hali obuna bo‘lmagansiz. Iltimos, quyidagi kanalga obuna bo‘ling:",
+            "❌ Siz hali kanalga obuna bo‘lmagansiz.\n"
+            "Iltimos, YouTube kanallarga obuna bo‘ling va ✅ Tekshirish tugmasini yana bosing 👇",
             reply_markup=youtube_keyboard
         )
     await call.answer()
 
 @dp.callback_query(F.data == "register")
 async def register_callback(call: CallbackQuery, state: FSMContext):
+    if not await check_subscription(call.from_user.id):
+        await call.message.edit_text(
+            "❌ Kanalga obuna bo‘lishingiz kerak. ✅ Tekshirish tugmasini bosing.", 
+            reply_markup=youtube_keyboard
+        )
+        await call.answer()
+        return
     await ask_for_payment(call, state)
     await call.answer()
 
+# ----------------------------
+# PAYMENT CHECK HANDLER
+# ----------------------------
 @dp.message(RegistrationState.waiting_for_payment_check, F.photo | F.document)
 async def handle_check(message: Message, state: FSMContext):
     await message.answer("🕔 Chekingiz admin tomonidan tekshirilmoqda.")
@@ -287,11 +302,14 @@ async def handle_check(message: Message, state: FSMContext):
             )
     except Exception as e:
         logger.exception("Failed to send check to admin: %s", e)
-        await message.answer("⚠️ Chekni adminga yuborishda xatolik yuz berdi. Keyinroq qayta yuboring.")
+        await message.answer("⚠️ Chekni adminga yuborishda xatolik yuz berdi.")
         await state.clear()
         return
     await state.set_state(RegistrationState.waiting_for_admin_approval)
 
+# ----------------------------
+# ADMIN APPROVE/REJECT HANDLER
+# ----------------------------
 @dp.callback_query(F.data.startswith("approve:"))
 async def approve_callback(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID:
@@ -316,6 +334,9 @@ async def reject_callback(call: CallbackQuery):
     await call.message.edit_reply_markup()
     await call.answer("❌ Rad etildi")
 
+# ----------------------------
+# PUBG INFO HANDLER
+# ----------------------------
 @dp.message(RegistrationState.waiting_for_pubg_nick)
 async def handle_pubg_info(message: Message, state: FSMContext):
     text = message.text or ""
