@@ -2,3 +2,4 @@ aiogram==3.*
 gspread
 oauth2client
 python-dotenv
+aiohttp
