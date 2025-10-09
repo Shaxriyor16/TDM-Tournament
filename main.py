@@ -1,9 +1,9 @@
-# bot.py
+# main.py
 """
-PUBG turnir bot (aiogram v3.22+ mos)
+PUBG turnir bot (aiogram v3.x mos)
 - .env orqali token yuklanadi (BOT_TOKEN)
-- ADMIN_ID .env yoki kod ichida berilishi mumkin
-- Google Sheets bilan ulangan (Reyting-bot.json)
+- ADMIN_ID .env yoki kod ichida vergul bilan bir nechta bo'lishi mumkin
+- Google Sheets bilan ulangan (SHEET_JSON fayl nomi .env ichida)
 - Obuna tekshirish, to'lov cheklarini yuborish va admin tasdiqlash
 - Inline keyboard: START -> YouTube 1, YouTube 2, ✅ Tekshirish
 """
@@ -11,7 +11,9 @@ PUBG turnir bot (aiogram v3.22+ mos)
 import os
 import asyncio
 import logging
-from typing import Union
+import contextlib
+from typing import Union, Optional, List
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -31,14 +33,32 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.base import StorageKey
+from aiogram.exceptions import TelegramAPIError
 
 # ----------------------------
-# CONFIG
+# CONFIG (from .env)
 # ----------------------------
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+ADMIN_IDS_RAW = os.getenv("ADMIN_ID", "").strip()  # can be "123,456"
 SHEET_JSON = os.getenv("SHEET_JSON", "Reyting-bot.json")
 REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@M24SHaxa_youtube")
+
+# parse admin ids into list of ints (fallback to empty list)
+ADMINS: List[int] = []
+if ADMIN_IDS_RAW:
+    for part in ADMIN_IDS_RAW.split(","):
+        part = part.strip()
+        if part.isdigit():
+            ADMINS.append(int(part))
+
+# if single ADMIN_ID env as int was used previously
+if not ADMINS:
+    try:
+        admin_int = int(os.getenv("ADMIN_ID", "0"))
+        if admin_int:
+            ADMINS = [admin_int]
+    except Exception:
+        ADMINS = []
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set. Put it into .env as BOT_TOKEN=your_token")
@@ -59,15 +79,28 @@ bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTM
 dp = Dispatcher(storage=MemoryStorage())
 
 # ----------------------------
-# GOOGLE SHEETS HELPERS
+# GOOGLE SHEETS HELPERS (with caching)
 # ----------------------------
+_gspread_client: Optional[gspread.client.Client] = None
+_gspread_sheet = None
+
 def connect_to_sheet(spreadsheet_name: str = "Pubg Reyting", worksheet_name: str = "Reyting-bot"):
+    """
+    Returns a gspread Worksheet object.
+    Caches client to avoid re-authenticating on each request.
+    """
+    global _gspread_client, _gspread_sheet
+    if _gspread_sheet:
+        return _gspread_sheet
     try:
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        if not os.path.exists(SHEET_JSON):
+            raise FileNotFoundError(f"Google credentials file not found: {SHEET_JSON}")
         creds = ServiceAccountCredentials.from_json_keyfile_name(SHEET_JSON, scope)
-        client = gspread.authorize(creds)
-        sheet = client.open(spreadsheet_name).worksheet(worksheet_name)
-        return sheet
+        _gspread_client = gspread.authorize(creds)
+        _gspread_sheet = _gspread_client.open(spreadsheet_name).worksheet(worksheet_name)
+        logger.info("Connected to Google Sheet: %s / %s", spreadsheet_name, worksheet_name)
+        return _gspread_sheet
     except Exception as e:
         logger.exception("Google Sheetsga ulanishda xatolik:")
         raise
@@ -123,30 +156,41 @@ youtube_keyboard = InlineKeyboardMarkup(
     ]
 )
 
-approve_buttons_template = lambda user_id: InlineKeyboardMarkup(
-    inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ To‘g‘ri", callback_data=f"approve:{user_id}"),
-            InlineKeyboardButton(text="❌ Noto‘g‘ri", callback_data=f"reject:{user_id}")
+def approve_buttons_template(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ To‘g‘ri", callback_data=f"approve:{user_id}"),
+                InlineKeyboardButton(text="❌ Noto‘g‘ri", callback_data=f"reject:{user_id}")
+            ]
         ]
-    ]
-)
+    )
 
 # ----------------------------
 # SUBSCRIPTION CHECK
 # ----------------------------
 async def check_subscription(user_id: int) -> bool:
+    """
+    Returns True if a user is member/creator/administrator of REQUIRED_CHANNEL.
+    Handles API errors gracefully.
+    """
     try:
         member = await bot.get_chat_member(REQUIRED_CHANNEL, user_id)
-        return member.status in ("member", "creator", "administrator")
+        return member.status in {"member", "creator", "administrator"}
+    except TelegramAPIError as e:
+        logger.warning("check_subscription TelegramAPIError for user %s: %s", user_id, e)
+        return False
     except Exception as e:
-        logger.warning("check_subscription error for user %s: %s", user_id, e)
+        logger.warning("check_subscription unexpected error for user %s: %s", user_id, e)
         return False
 
 # ----------------------------
 # PAYMENT FLOW
 # ----------------------------
 async def ask_for_payment(target: Union[Message, CallbackQuery], state: FSMContext):
+    """
+    Send payment instructions directly to the user (private).
+    """
     user_id = target.from_user.id
     text = (
         "💳 <b>Karta turi:</b> HUMO\n"
@@ -154,11 +198,10 @@ async def ask_for_payment(target: Union[Message, CallbackQuery], state: FSMConte
         "📌 Toʻlovni amalga oshirib, CHECK (skrinshot) yuboring."
     )
     msg = await bot.send_message(user_id, text)
+    # auto-delete the instructional message after 5 seconds (best-effort)
     await asyncio.sleep(5)
-    try: 
+    with contextlib.suppress(Exception):
         await bot.delete_message(user_id, msg.message_id)
-    except: 
-        pass
     await bot.send_message(user_id, "✅ Endi to‘lovni amalga oshirgach, <b>chekni yuboring</b> (rasm yoki fayl):")
     await state.set_state(RegistrationState.waiting_for_payment_check)
 
@@ -266,7 +309,7 @@ async def subscription_callback(call: CallbackQuery):
 async def register_callback(call: CallbackQuery, state: FSMContext):
     if not await check_subscription(call.from_user.id):
         await call.message.edit_text(
-            "❌ Kanalga obuna bo‘lishingiz kerak. ✅ Tekshirish tugmasini bosing.", 
+            "❌ Kanalga obuna bo‘lishingiz kerak. ✅ Tekshirish tugmasini bosing.",
             reply_markup=youtube_keyboard
         )
         await call.answer()
@@ -319,19 +362,19 @@ async def handle_check(message: Message, state: FSMContext):
         if message.photo:
             file_id = message.photo[-1].file_id
             await bot.send_photo(
-                ADMIN_ID, file_id,
+                ADMINS[0] if ADMINS else 0, file_id,
                 caption=(f"🥾 Yangi chek:\n👤 <b>{message.from_user.full_name}</b>\n"
                          f"🆔 <code>{message.from_user.id}</code>\n"
-                         f"📌 @{message.from_user.username or 'username yo‘q'}"),
+                         f"📌 @{message.from_user.username or 'username yoq'}"),
                 reply_markup=approve_buttons
             )
         else:
             file_id = message.document.file_id
             await bot.send_document(
-                ADMIN_ID, file_id,
+                ADMINS[0] if ADMINS else 0, file_id,
                 caption=(f"🥾 Yangi chek (fayl):\n👤 <b>{message.from_user.full_name}</b>\n"
                          f"🆔 <code>{message.from_user.id}</code>\n"
-                         f"📌 @{message.from_user.username or 'username yo‘q'}"),
+                         f"📌 @{message.from_user.username or 'username yoq'}"),
                 reply_markup=approve_buttons
             )
     except Exception as e:
@@ -346,26 +389,36 @@ async def handle_check(message: Message, state: FSMContext):
 # ----------------------------
 @dp.callback_query(F.data.startswith("approve:"))
 async def approve_callback(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
+    if call.from_user.id not in ADMINS:
         await call.answer("Siz admin emassiz.", show_alert=True)
         return
-    user_id = int(call.data.split(":")[1])
+    try:
+        user_id = int(call.data.split(":")[1])
+    except Exception:
+        await call.answer("User ID topilmadi.", show_alert=True)
+        return
     await bot.send_message(user_id, "✅ Chekingiz tasdiqlandi. Endi PUBG nickname va ID'ingizni yuboring.")
     key = StorageKey(bot_id=bot.id, chat_id=user_id, user_id=user_id)
     await dp.storage.set_state(key, RegistrationState.waiting_for_pubg_nick.state)
-    await call.message.edit_reply_markup()
+    with contextlib.suppress(Exception):
+        await call.message.edit_reply_markup()
     await call.answer("✅ Tasdiqlandi")
 
 @dp.callback_query(F.data.startswith("reject:"))
 async def reject_callback(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
+    if call.from_user.id not in ADMINS:
         await call.answer("Siz admin emassiz.", show_alert=True)
         return
-    user_id = int(call.data.split(":")[1])
+    try:
+        user_id = int(call.data.split(":")[1])
+    except Exception:
+        await call.answer("User ID topilmadi.", show_alert=True)
+        return
     key = StorageKey(bot_id=bot.id, chat_id=user_id, user_id=user_id)
     await dp.storage.clear_state(key)
     await bot.send_message(user_id, "❌ Chekingiz rad etildi. Qayta urinib ko‘ring.")
-    await call.message.edit_reply_markup()
+    with contextlib.suppress(Exception):
+        await call.message.edit_reply_markup()
     await call.answer("❌ Rad etildi")
 
 # ----------------------------
@@ -386,8 +439,10 @@ async def handle_pubg_info(message: Message, state: FSMContext):
     else:
         await message.answer("⚠️ Reytingga qoʻshishda xatolik yuz berdi. Admin bilan bog‘laning.", reply_markup=reply_social_menu)
     try:
-        await bot.send_message(ADMIN_ID, f"🆕 Yangi qatnashchi: {message.from_user.full_name}\nPUBG: {pubg_nick} | ID: {pubg_id}\nUser ID: {message.from_user.id}")
-    except Exception: pass
+        await bot.send_message(ADMINS[0] if ADMINS else 0,
+                               f"🆕 Yangi qatnashchi: {message.from_user.full_name}\nPUBG: {pubg_nick} | ID: {pubg_id}\nUser ID: {message.from_user.id}")
+    except Exception:
+        pass
     await state.clear()
 
 # ----------------------------
@@ -395,10 +450,19 @@ async def handle_pubg_info(message: Message, state: FSMContext):
 # ----------------------------
 async def main():
     logger.info("Bot ishga tushmoqda...")
+    # warn if admin not set
+    if not ADMINS:
+        logger.warning("ADMIN_ID muhit o'zgaruvchisi aniqlanmadi. Admin funktsiyalari ishlamaydi.")
+    # Try to pre-connect Google Sheets (optional)
+    try:
+        connect_to_sheet()
+    except Exception:
+        logger.info("Google Sheetsga avtomatik ulanishda muammo yuz berdi — ishlash davom etadi, ammo /reyting va append funksiyalari xatolik beradi.")
     try:
         await dp.start_polling(bot)
     finally:
         await bot.session.close()
+        logger.info("Bot to‘xtatildi.")
 
 if __name__ == "__main__":
     asyncio.run(main())
