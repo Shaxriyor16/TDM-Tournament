@@ -1,17 +1,23 @@
 # main.py
 """
-PUBG turnir bot (aiogram v3.x mos)
-- .env orqali token yuklanadi (BOT_TOKEN)
-- ADMIN_ID .env yoki kod ichida vergul bilan bir nechta bo'lishi mumkin
-- Google Sheets bilan ulangan (SHEET_JSON fayl nomi .env ichida)
-- Obuna tekshirish, to'lov cheklarini yuborish va admin tasdiqlash
-- Inline keyboard: START -> YouTube 1, YouTube 2, ✅ Tekshirish
+PUBG turnir bot (aiogram v3.x mos, Render / Railway deploy-ready)
+
+Tavsiyalar:
+- .env ichida BOT_TOKEN, ADMIN_ID, REQUIRED_CHANNEL va (SHEET_JSON or SHEET_JSON_DATA or SHEET_JSON_B64) bo'lishi kerak.
+- Agar SHEET_JSON faylni to'g'ridan-to'g'ri yuklash mumkin bo'lsa, SHEET_JSON="Reyting-bot.json".
+- Yoki SHEET_JSON_DATA ga butun JSON (string) ni qo'ying.
+- Yoki SHEET_JSON_B64 ga base64 kodlangan JSON joylashtiring.
+
+Important:
+- Botni bitta joyda (faqat Render) ishlating — "Conflict: terminated by other getUpdates request" xatosini oldini olish uchun.
 """
 
 import os
 import asyncio
 import logging
 import contextlib
+import json
+import base64
 from typing import Union, Optional, List
 
 from dotenv import load_dotenv
@@ -40,18 +46,19 @@ from aiogram.exceptions import TelegramAPIError
 # ----------------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_IDS_RAW = os.getenv("ADMIN_ID", "").strip()  # can be "123,456"
-SHEET_JSON = os.getenv("SHEET_JSON", "Reyting-bot.json")
-REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@M24SHaxa_youtube")
+SHEET_JSON = os.getenv("SHEET_JSON", "Reyting-bot.json").strip()
+SHEET_JSON_DATA = os.getenv("SHEET_JSON_DATA", "").strip()  # raw JSON string
+SHEET_JSON_B64 = os.getenv("SHEET_JSON_B64", "").strip()    # base64 encoded JSON
+REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@M24SHaxa_youtube").strip()
 
-# parse admin ids into list of ints (fallback to empty list)
+# parse admin ids into list of ints
 ADMINS: List[int] = []
 if ADMIN_IDS_RAW:
     for part in ADMIN_IDS_RAW.split(","):
         part = part.strip()
         if part.isdigit():
             ADMINS.append(int(part))
-
-# if single ADMIN_ID env as int was used previously
+# fallback: single ADMIN_ID env as int used previously
 if not ADMINS:
     try:
         admin_int = int(os.getenv("ADMIN_ID", "0"))
@@ -72,6 +79,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# warn if multiple admin not set
+if not ADMINS:
+    logger.warning("ADMIN_ID muhit o'zgaruvchisi aniqlanmadi. Admin funktsiyalari ishlamaydi.")
+
 # ----------------------------
 # BOT SETUP
 # ----------------------------
@@ -79,24 +90,59 @@ bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTM
 dp = Dispatcher(storage=MemoryStorage())
 
 # ----------------------------
-# GOOGLE SHEETS HELPERS (with caching)
+# GOOGLE SHEETS HELPERS (with caching & flexible credentials)
 # ----------------------------
 _gspread_client: Optional[gspread.client.Client] = None
 _gspread_sheet = None
 
+def _load_service_account_creds(scope):
+    """
+    Try multiple ways to obtain credentials:
+    1) If SHEET_JSON_DATA is provided (raw JSON), use it.
+    2) If SHEET_JSON_B64 is provided (base64 JSON), decode and use it.
+    3) Else, try to load from SHEET_JSON filename (file must exist on disk).
+    """
+    # 1) raw JSON string in env
+    if SHEET_JSON_DATA:
+        try:
+            creds_dict = json.loads(SHEET_JSON_DATA)
+            logger.info("Loaded Google credentials from SHEET_JSON_DATA env.")
+            return ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        except Exception as e:
+            logger.exception("Failed to load credentials from SHEET_JSON_DATA: %s", e)
+            raise
+
+    # 2) base64 encoded JSON
+    if SHEET_JSON_B64:
+        try:
+            decoded = base64.b64decode(SHEET_JSON_B64).decode("utf-8")
+            creds_dict = json.loads(decoded)
+            logger.info("Loaded Google credentials from SHEET_JSON_B64 env.")
+            return ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        except Exception as e:
+            logger.exception("Failed to load credentials from SHEET_JSON_B64: %s", e)
+            raise
+
+    # 3) file on disk
+    if SHEET_JSON and os.path.exists(SHEET_JSON):
+        try:
+            return ServiceAccountCredentials.from_json_keyfile_name(SHEET_JSON, scope)
+        except Exception as e:
+            logger.exception("Failed to load credentials from file %s: %s", SHEET_JSON, e)
+            raise
+
+    raise FileNotFoundError("No Google credentials provided. Set SHEET_JSON (file), SHEET_JSON_DATA or SHEET_JSON_B64.")
+
 def connect_to_sheet(spreadsheet_name: str = "Pubg Reyting", worksheet_name: str = "Reyting-bot"):
     """
-    Returns a gspread Worksheet object.
-    Caches client to avoid re-authenticating on each request.
+    Returns a gspread Worksheet object. Caches the client/worksheet.
     """
     global _gspread_client, _gspread_sheet
     if _gspread_sheet:
         return _gspread_sheet
     try:
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        if not os.path.exists(SHEET_JSON):
-            raise FileNotFoundError(f"Google credentials file not found: {SHEET_JSON}")
-        creds = ServiceAccountCredentials.from_json_keyfile_name(SHEET_JSON, scope)
+        creds = _load_service_account_creds(scope)
         _gspread_client = gspread.authorize(creds)
         _gspread_sheet = _gspread_client.open(spreadsheet_name).worksheet(worksheet_name)
         logger.info("Connected to Google Sheet: %s / %s", spreadsheet_name, worksheet_name)
@@ -111,7 +157,7 @@ def append_to_sheet(nickname: str, pubg_id: str):
         sheet.append_row([nickname, pubg_id])
         logger.info("Row added to sheet: %s | %s", nickname, pubg_id)
         return True
-    except Exception as e:
+    except Exception:
         logger.exception("sheet append error")
         return False
 
@@ -176,6 +222,7 @@ async def check_subscription(user_id: int) -> bool:
     """
     try:
         member = await bot.get_chat_member(REQUIRED_CHANNEL, user_id)
+        # member.status can be 'member', 'creator', 'administrator', 'left', 'kicked'
         return member.status in {"member", "creator", "administrator"}
     except TelegramAPIError as e:
         logger.warning("check_subscription TelegramAPIError for user %s: %s", user_id, e)
@@ -299,7 +346,7 @@ async def subscription_callback(call: CallbackQuery):
         )
     else:
         await call.message.edit_text(
-            "❌ Siz hali kanalga obuna bo‘lmagansiz.\n"
+            "❌ Siz hali kanalga obuna bo‘lmadingiz.\n"
             "Iltimos, YouTube kanallarga obuna bo‘ling va ✅ Tekshirish tugmasini yana bosing 👇",
             reply_markup=youtube_keyboard
         )
@@ -359,10 +406,17 @@ async def handle_check(message: Message, state: FSMContext):
     await message.answer("🕔 Chekingiz admin tomonidan tekshirilmoqda.")
     approve_buttons = approve_buttons_template(message.from_user.id)
     try:
+        # send to first admin in list (if exists)
+        admin_id_to_send = ADMINS[0] if ADMINS else None
+        if not admin_id_to_send:
+            await message.answer("⚠️ Admin hali belgilanmagan — admin funktsiyalari ishlamaydi.")
+            await state.clear()
+            return
+
         if message.photo:
             file_id = message.photo[-1].file_id
             await bot.send_photo(
-                ADMINS[0] if ADMINS else 0, file_id,
+                admin_id_to_send, file_id,
                 caption=(f"🥾 Yangi chek:\n👤 <b>{message.from_user.full_name}</b>\n"
                          f"🆔 <code>{message.from_user.id}</code>\n"
                          f"📌 @{message.from_user.username or 'username yoq'}"),
@@ -371,7 +425,7 @@ async def handle_check(message: Message, state: FSMContext):
         else:
             file_id = message.document.file_id
             await bot.send_document(
-                ADMINS[0] if ADMINS else 0, file_id,
+                admin_id_to_send, file_id,
                 caption=(f"🥾 Yangi chek (fayl):\n👤 <b>{message.from_user.full_name}</b>\n"
                          f"🆔 <code>{message.from_user.id}</code>\n"
                          f"📌 @{message.from_user.username or 'username yoq'}"),
@@ -439,8 +493,9 @@ async def handle_pubg_info(message: Message, state: FSMContext):
     else:
         await message.answer("⚠️ Reytingga qoʻshishda xatolik yuz berdi. Admin bilan bog‘laning.", reply_markup=reply_social_menu)
     try:
-        await bot.send_message(ADMINS[0] if ADMINS else 0,
-                               f"🆕 Yangi qatnashchi: {message.from_user.full_name}\nPUBG: {pubg_nick} | ID: {pubg_id}\nUser ID: {message.from_user.id}")
+        if ADMINS:
+            await bot.send_message(ADMINS[0],
+                                   f"🆕 Yangi qatnashchi: {message.from_user.full_name}\nPUBG: {pubg_nick} | ID: {pubg_id}\nUser ID: {message.from_user.id}")
     except Exception:
         pass
     await state.clear()
@@ -450,14 +505,18 @@ async def handle_pubg_info(message: Message, state: FSMContext):
 # ----------------------------
 async def main():
     logger.info("Bot ishga tushmoqda...")
-    # warn if admin not set
-    if not ADMINS:
-        logger.warning("ADMIN_ID muhit o'zgaruvchisi aniqlanmadi. Admin funktsiyalari ishlamaydi.")
     # Try to pre-connect Google Sheets (optional)
     try:
         connect_to_sheet()
+    except FileNotFoundError as e:
+        logger.info("Google Sheets credentials not found (expected if not uploaded): %s", e)
+        logger.info("Set SHEET_JSON (file) or SHEET_JSON_DATA / SHEET_JSON_B64 env vars.")
     except Exception:
         logger.info("Google Sheetsga avtomatik ulanishda muammo yuz berdi — ishlash davom etadi, ammo /reyting va append funksiyalari xatolik beradi.")
+
+    # Warn about possible polling conflicts
+    logger.info("Eslatma: Agar botni lokalda ham ishga tushirgan bo'lsangiz, avval uni to'xtating. Aks holda TelegramConflictError bo'lishi mumkin.")
+
     try:
         await dp.start_polling(bot)
     finally:
